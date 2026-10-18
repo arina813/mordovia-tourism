@@ -59,7 +59,7 @@ module.exports = async function handler(req, res) {
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: systemInstruction }] },
           contents,
-          generationConfig: { temperature: 0.7, maxOutputTokens: 900 }
+          generationConfig: { temperature: 0.7, maxOutputTokens: 1800 }
         })
       }
     );
