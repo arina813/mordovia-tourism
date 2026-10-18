@@ -1,3 +1,4 @@
+
 module.exports = async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
@@ -5,45 +6,80 @@ module.exports = async function handler(req, res) {
   }
 
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    return res.status(500).json({ error: "На сервере не настроен GEMINI_API_KEY." });
+  if (!apiKey || !apiKey.trim()) {
+    console.error("LISICHKA_DIAG: GEMINI_API_KEY is missing");
+    return res.status(500).json({
+      error: "Сервер не получил GEMINI_API_KEY. Проверьте Production и Redeploy."
+    });
   }
 
   try {
-    const incoming = Array.isArray(req.body && req.body.messages) ? req.body.messages : [];
+    const incoming = Array.isArray(req.body && req.body.messages)
+      ? req.body.messages : [];
+
     const contents = incoming
       .filter(m => (m.role === "user" || m.role === "model") && Array.isArray(m.parts))
       .slice(-12)
-      .map(m => ({ role: m.role, parts: m.parts.map(p => ({ text: String(p.text || "").slice(0, 4000) })) }))
+      .map(m => ({
+        role: m.role,
+        parts: m.parts
+          .filter(p => p && typeof p.text === "string")
+          .map(p => ({ text: p.text.slice(0, 4000) }))
+      }))
       .filter(m => m.parts.some(p => p.text.trim()));
 
     if (!contents.length || !contents.some(m => m.role === "user")) {
       return res.status(400).json({ error: "Напишите сообщение Лисичке." });
     }
 
-    const systemInstruction = `Ты — Лисичка, дружелюбный ИИ-помощник туристического сайта «Шумбрат — Мордовия». Помогаешь планировать путешествия по Республике Мордовия и Саранску. Отвечай по-русски, естественно, тепло и конкретно. Генерируй новый ответ на каждый запрос, не повторяй одну и ту же заготовку. Уточняй бюджет, даты, количество дней, состав путешественников и интересы, если это важно. Предлагай понятные варианты маршрутов, идеи на разную погоду, природу, культуру эрзя и мокша, музеи, семейный отдых и местную кухню. Не выдумывай точные цены, наличие мест, часы работы, расписания транспорта или текущую погоду. Если точные данные не переданы в сообщении, честно скажи, что их нужно проверить перед поездкой. Используй сведения из переписки, не утверждай, что проверила сайт или интернет, если этого не делала. Пиши структурированно, но не слишком длинно; при планировании маршрута указывай последовательность остановок и кратко объясняй выбор.`;
+    const systemInstruction = `Ты — Лисичка, дружелюбный ИИ-помощник туристического сайта «Шумбрат — Мордовия». Помогаешь планировать путешествия по Республике Мордовия и Саранску. Отвечай по-русски, естественно, тепло и конкретно. Не выдумывай точные цены, наличие мест, часы работы, расписания транспорта или текущую погоду. Если точные данные не переданы, честно скажи, что их нужно проверить. Пиши понятно и не слишком длинно.`;
 
-    const response = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: systemInstruction }] },
-        contents,
-        generationConfig: { temperature: 0.9, maxOutputTokens: 900 }
-      })
-    });
+    console.log("LISICHKA_DIAG: sending request to Gemini");
 
-    const result = await response.json();
+    const response = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": apiKey.trim()
+        },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: systemInstruction }] },
+          contents,
+          generationConfig: { temperature: 0.7, maxOutputTokens: 900 }
+        })
+      }
+    );
+
+    const result = await response.json().catch(() => ({}));
+
     if (!response.ok) {
-      console.error("Gemini API error:", response.status, JSON.stringify(result).slice(0, 1500));
-      return res.status(502).json({ error: "Gemini API не принял запрос. Проверь ключ, доступ к модели и лимиты API." });
+      const googleMessage = result?.error?.message || "Google не предоставил описание ошибки";
+      console.error("LISICHKA_DIAG: Gemini HTTP", response.status, googleMessage);
+      return res.status(502).json({
+        error: `Ошибка Gemini (${response.status}). Подробности доступны в журналах Vercel.`
+      });
     }
-    const reply = (result.candidates && result.candidates[0] && result.candidates[0].content && result.candidates[0].content.parts || [])
+
+    const reply = (result.candidates?.[0]?.content?.parts || [])
       .map(p => p.text || "").join("\n").trim();
-    if (!reply) return res.status(502).json({ error: "Gemini не вернул текстовый ответ." });
+
+    if (!reply) {
+      console.error("LISICHKA_DIAG: Gemini returned no text");
+      return res.status(502).json({ error: "Gemini не вернул текстовый ответ." });
+    }
+
+    console.log("LISICHKA_DIAG: response received successfully");
     return res.status(200).json({ reply });
+
   } catch (error) {
-    console.error("Lisichka API route error:", error);
-    return res.status(500).json({ error: "Внутренняя ошибка при создании ответа." });
+    console.error(
+      "LISICHKA_DIAG: internal error",
+      error?.message || String(error)
+    );
+    return res.status(500).json({
+      error: "Внутренняя ошибка сервера при обращении к Gemini."
+    });
   }
 };
