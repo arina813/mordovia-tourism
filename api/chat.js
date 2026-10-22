@@ -138,10 +138,11 @@ module.exports = async function handler(req, res) {
 
     // Резерв включаем только при 503 или сетевом тайм-ауте/сбое.
     const shouldFallback =
-      status === 503 ||
-      !geminiResponse ||
-      geminiError === "Gemini timeout" ||
-      geminiError === "Сетевая ошибка Gemini";
+  status === 429 ||
+  status === 503 ||
+  !geminiResponse ||
+  geminiError === "Gemini timeout" ||
+  geminiError === "Сетевая ошибка Gemini";
 
     if (!shouldFallback) {
       if (status === 429) {
