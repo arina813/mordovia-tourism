@@ -1,24 +1,30 @@
-
 module.exports = async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
-    return res.status(405).json({ error: "Используйте POST-запрос." });
+    return res.status(405).json({
+      error: "Используйте POST-запрос."
+    });
   }
 
   const apiKey = process.env.GEMINI_API_KEY;
+
   if (!apiKey || !apiKey.trim()) {
     console.error("LISICHKA_DIAG: GEMINI_API_KEY is missing");
     return res.status(500).json({
-      error: "Сервер не получил GEMINI_API_KEY. Проверьте Production и Redeploy."
+      error: "Сервер не получил GEMINI_API_KEY. Проверьте настройки Vercel."
     });
   }
 
   try {
     const incoming = Array.isArray(req.body && req.body.messages)
-      ? req.body.messages : [];
+      ? req.body.messages
+      : [];
 
     const contents = incoming
-      .filter(m => (m.role === "user" || m.role === "model") && Array.isArray(m.parts))
+      .filter(m =>
+        (m.role === "user" || m.role === "model") &&
+        Array.isArray(m.parts)
+      )
       .slice(-12)
       .map(m => ({
         role: m.role,
@@ -29,7 +35,9 @@ module.exports = async function handler(req, res) {
       .filter(m => m.parts.some(p => p.text.trim()));
 
     if (!contents.length || !contents.some(m => m.role === "user")) {
-      return res.status(400).json({ error: "Напишите сообщение Лисичке." });
+      return res.status(400).json({
+        error: "Напишите сообщение Лисичке."
+      });
     }
 
     const systemInstruction = `Ты — Лисичка, дружелюбный туристический помощник сайта «Шумбрат — Мордовия». Помогай планировать поездки по Саранску и Республике Мордовия.
@@ -46,43 +54,127 @@ module.exports = async function handler(req, res) {
 
 Не выдумывай точные цены, расписания, часы работы, наличие мест и текущую погоду. Если эти сведения неизвестны, предупреди, что их нужно проверить перед поездкой.`;
 
-    console.log("LISICHKA_DIAG: sending request to Gemini");
+    const url =
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent";
 
-    const response = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": apiKey.trim()
-        },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: systemInstruction }] },
-          contents,
-          generationConfig: { temperature: 0.7, maxOutputTokens: 1800 }
-        })
+    const requestBody = {
+      systemInstruction: {
+        parts: [{ text: systemInstruction }]
+      },
+      contents,
+      generationConfig: {
+        temperature: 0.7,
+        maxOutputTokens: 1800
       }
-    );
+    };
 
-    const result = await response.json().catch(() => ({}));
+    let result = null;
+    let lastStatus = 0;
 
-    if (!response.ok) {
-      const googleMessage = result?.error?.message || "Google не предоставил описание ошибки";
-      console.error("LISICHKA_DIAG: Gemini HTTP", response.status, googleMessage);
+    // Максимум 3 попытки при временных ошибках.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let response;
+
+      try {
+        console.log(
+          `LISICHKA_DIAG: Gemini attempt ${attempt + 1}/3`
+        );
+
+        response = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": apiKey.trim()
+          },
+          body: JSON.stringify(requestBody)
+        });
+      } catch (networkError) {
+        console.error(
+          "LISICHKA_DIAG: network error",
+          networkError?.message || String(networkError)
+        );
+
+        if (attempt === 2) {
+          return res.status(502).json({
+            error: "Не удалось связаться с Gemini. Попробуйте ещё раз через минуту."
+          });
+        }
+
+        await new Promise(resolve =>
+          setTimeout(resolve, 1000 * (attempt + 1))
+        );
+        continue;
+      }
+
+      lastStatus = response.status;
+      result = await response.json().catch(() => ({}));
+
+      if (response.ok) {
+        break;
+      }
+
+      const temporaryError =
+        response.status === 408 ||
+        response.status === 429 ||
+        response.status >= 500;
+
+      const googleMessage =
+        result?.error?.message || "Описание ошибки отсутствует";
+
+      console.error(
+        "LISICHKA_DIAG: Gemini HTTP",
+        response.status,
+        googleMessage
+      );
+
+      if (!temporaryError || attempt === 2) {
+        if (response.status === 503 || response.status >= 500) {
+          return res.status(502).json({
+            error: "Gemini временно перегружен. Подождите немного и отправьте сообщение ещё раз."
+          });
+        }
+
+        if (response.status === 429) {
+          return res.status(502).json({
+            error: "Временно превышен лимит запросов Gemini. Попробуйте позже."
+          });
+        }
+
+        return res.status(502).json({
+          error: `Ошибка Gemini (${response.status}). Проверьте настройки API и журналы Vercel.`
+        });
+      }
+
+      // Паузы между попытками: 1 секунда, затем 2 секунды.
+      await new Promise(resolve =>
+        setTimeout(resolve, 1000 * (attempt + 1))
+      );
+    }
+
+    if (lastStatus && (lastStatus < 200 || lastStatus >= 300)) {
       return res.status(502).json({
-        error: `Ошибка Gemini (${response.status}). Подробности доступны в журналах Vercel.`
+        error: "Gemini пока не отвечает. Попробуйте ещё раз немного позже."
       });
     }
 
-    const reply = (result.candidates?.[0]?.content?.parts || [])
-      .map(p => p.text || "").join("\n").trim();
+    const reply = (result?.candidates?.[0]?.content?.parts || [])
+      .map(p => p.text || "")
+      .join("\n")
+      .trim();
 
     if (!reply) {
-      console.error("LISICHKA_DIAG: Gemini returned no text");
-      return res.status(502).json({ error: "Gemini не вернул текстовый ответ." });
+      console.error(
+        "LISICHKA_DIAG: Gemini returned no text",
+        JSON.stringify(result?.promptFeedback || {})
+      );
+
+      return res.status(502).json({
+        error: "Gemini не вернул текстовый ответ. Попробуйте задать вопрос ещё раз."
+      });
     }
 
     console.log("LISICHKA_DIAG: response received successfully");
+
     return res.status(200).json({ reply });
 
   } catch (error) {
@@ -90,6 +182,7 @@ module.exports = async function handler(req, res) {
       "LISICHKA_DIAG: internal error",
       error?.message || String(error)
     );
+
     return res.status(500).json({
       error: "Внутренняя ошибка сервера при обращении к Gemini."
     });
