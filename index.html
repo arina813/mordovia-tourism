@@ -1822,8 +1822,21 @@ function renderEvents(){
 function drawNav(){$('nav').innerHTML=PAGES.map(([k,n])=>
   `<button class="${curPage===k?'active':''}" onclick="go('${k}')">${n}</button>`).join('');}
 
-function pic(key,cls=''){ const src=IMG[key]||((typeof key==='string'&&(/^(https?:\/\/|data:image\/)/.test(key)))?key:''); return src ? `<img src="${src}" class="${cls}" alt="" loading="lazy" onerror="this.onerror=null;this.src=IMG.SMOLNY">`
-  : `<div class="nophoto"><b>Фото объекта добавляется</b></div>`; }
+
+function pic(key, cls = '') {
+  const src = IMG[key] || (
+    typeof key === 'string' &&
+    /^(https?:\/\/|data:image\/|assets\/)/.test(key)
+      ? key
+      : ''
+  );
+
+  return src
+    ? `<img src="${src}" class="${cls}" alt="" loading="lazy"
+        onerror="this.onerror=null;this.src=IMG.ORNAMENT">`
+    : `<div class="nophoto"><b>Фото объекта добавляется</b></div>`;
+}
+
 
 function isFav(id){return favs.includes(id)}
 function toggleFav(id,e){e.stopPropagation();
