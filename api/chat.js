@@ -185,7 +185,7 @@ module.exports = async function handler(req, res) {
   agent_config: { type: "antigravity" },
           system_instruction: systemInstruction,
           input: conversation,
-          store: false
+          store: true
         }),
         signal: AbortSignal.timeout(45000)
       }
