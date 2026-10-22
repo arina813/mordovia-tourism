@@ -1,3 +1,4 @@
+
 module.exports = async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
@@ -11,12 +12,50 @@ module.exports = async function handler(req, res) {
   if (!apiKey || !apiKey.trim()) {
     console.error("LISICHKA_DIAG: GEMINI_API_KEY is missing");
     return res.status(500).json({
-      error: "Сервер не получил GEMINI_API_KEY. Проверьте настройки Vercel."
+      error: "Сервер не получил GEMINI_API_KEY."
     });
   }
 
+  const systemInstruction = `Ты — Лисичка, дружелюбный туристический помощник сайта «Шумбрат — Мордовия». Помогай планировать поездки по Саранску и Республике Мордовия.
+
+Всегда давай полный, законченный ответ за одно сообщение. Не предлагай написать «продолжай». Для маршрута на день расписывай утро, обед, вторую половину дня и вечер, объясняй, что посмотреть, и добавляй практические советы.
+
+Пиши естественным русским языком, тепло и без шаблонных вступлений. Не используй Markdown-разметку: символы #, звёздочки для выделения и списков, обратные кавычки и таблицы. Используй обычные названия разделов и короткие абзацы.
+
+Учитывай предыдущие сообщения. Не задавай лишних вопросов, если можешь предложить разумный вариант. Не выдумывай цены, расписания, часы работы, наличие мест и текущую погоду.`;
+
+  const sleep = ms =>
+    new Promise(resolve => setTimeout(resolve, ms));
+
+  async function readJson(response) {
+    return response.json().catch(() => ({}));
+  }
+
+  function extractGeminiText(data) {
+    return (data?.candidates?.[0]?.content?.parts || [])
+      .map(part => part.text || "")
+      .join("\n")
+      .trim();
+  }
+
+  function extractAgentText(data) {
+    if (typeof data?.output_text === "string") {
+      return data.output_text.trim();
+    }
+
+    const steps = Array.isArray(data?.steps) ? data.steps : [];
+
+    return steps
+      .filter(step => step.type === "model_output")
+      .flatMap(step => step.content || [])
+      .filter(part => part.type === "text" && part.text)
+      .map(part => part.text)
+      .join("\n")
+      .trim();
+  }
+
   try {
-    const incoming = Array.isArray(req.body && req.body.messages)
+    const incoming = Array.isArray(req.body?.messages)
       ? req.body.messages
       : [];
 
@@ -40,141 +79,146 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    const systemInstruction = `Ты — Лисичка, дружелюбный туристический помощник сайта «Шумбрат — Мордовия». Помогай планировать поездки по Саранску и Республике Мордовия.
+    // 1. Сначала пробуем обычный Gemini.
+    let geminiResponse = null;
+    let geminiData = {};
+    let geminiError = null;
 
-Главное правило: всегда старайся дать ПОЛНЫЙ, ЗАКОНЧЕННЫЙ ответ за одно сообщение. Не дели ответ на части и никогда не предлагай пользователю написать «продолжай», чтобы получить оставшуюся информацию. Не обрывай маршрут на середине.
-
-Если пользователь просит составить маршрут на день, сразу распиши весь день: утро, обед, вторая половина дня и вечер. Для каждой остановки кратко объясни, что там посмотреть и зачем туда идти. В конце дай несколько практических советов.
-
-Если пользователь просит подробный план, включай все основные пункты сразу. Если информации много, сокращай второстепенные подробности, но сохраняй целостность ответа.
-
-Пиши естественным русским языком, тепло и без шаблонных вступлений. Не используй Markdown-разметку: символы #, звёздочки для выделения и списков, обратные кавычки и таблицы. Используй обычные названия разделов и короткие абзацы.
-
-Учитывай предыдущие сообщения и не заставляй пользователя повторять уже сообщённые пожелания. Если данных достаточно, не задавай лишних вопросов — предложи разумный вариант и при необходимости укажи свои предположения.
-
-Не выдумывай точные цены, расписания, часы работы, наличие мест и текущую погоду. Если эти сведения неизвестны, предупреди, что их нужно проверить перед поездкой.`;
-
-    const url =
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent";
-
-    const requestBody = {
-      systemInstruction: {
-        parts: [{ text: systemInstruction }]
-      },
-      contents,
-      generationConfig: {
-        temperature: 0.7,
-        maxOutputTokens: 1800
-      }
-    };
-
-    let result = null;
-    let lastStatus = 0;
-
-    // Максимум 3 попытки при временных ошибках.
-    for (let attempt = 0; attempt < 3; attempt++) {
-      let response;
-
-      try {
-        console.log(
-          `LISICHKA_DIAG: Gemini attempt ${attempt + 1}/3`
-        );
-
-        response = await fetch(url, {
+    try {
+      geminiResponse = await fetch(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
+        {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             "x-goog-api-key": apiKey.trim()
           },
-          body: JSON.stringify(requestBody)
-        });
-      } catch (networkError) {
+          body: JSON.stringify({
+            systemInstruction: {
+              parts: [{ text: systemInstruction }]
+            },
+            contents,
+            generationConfig: {
+              temperature: 0.7,
+              maxOutputTokens: 1800
+            }
+          }),
+          signal: AbortSignal.timeout(15000)
+        }
+      );
+
+      geminiData = await readJson(geminiResponse);
+
+      if (geminiResponse.ok) {
+        const reply = extractGeminiText(geminiData);
+
+        if (reply) {
+          console.log("LISICHKA_DIAG: Gemini success");
+          return res.status(200).json({ reply });
+        }
+
+        geminiError = "Gemini вернул пустой ответ";
+      } else {
         console.error(
-          "LISICHKA_DIAG: network error",
-          networkError?.message || String(networkError)
+          "LISICHKA_DIAG: Gemini HTTP",
+          geminiResponse.status,
+          geminiData?.error?.message || "Описание ошибки отсутствует"
         );
-
-        if (attempt === 2) {
-          return res.status(502).json({
-            error: "Не удалось связаться с Gemini. Попробуйте ещё раз через минуту."
-          });
-        }
-
-        await new Promise(resolve =>
-          setTimeout(resolve, 1000 * (attempt + 1))
-        );
-        continue;
       }
+    } catch (error) {
+      geminiError = error?.name === "TimeoutError" ||
+        error?.name === "AbortError"
+        ? "Gemini timeout"
+        : (error?.message || "Сетевая ошибка Gemini");
 
-      lastStatus = response.status;
-      result = await response.json().catch(() => ({}));
-
-      if (response.ok) {
-        break;
-      }
-
-      const temporaryError =
-        response.status === 408 ||
-        response.status === 429 ||
-        response.status >= 500;
-
-      const googleMessage =
-        result?.error?.message || "Описание ошибки отсутствует";
-
-      console.error(
-        "LISICHKA_DIAG: Gemini HTTP",
-        response.status,
-        googleMessage
-      );
-
-      if (!temporaryError || attempt === 2) {
-        if (response.status === 503 || response.status >= 500) {
-          return res.status(502).json({
-            error: "Gemini временно перегружен. Подождите немного и отправьте сообщение ещё раз."
-          });
-        }
-
-        if (response.status === 429) {
-          return res.status(502).json({
-            error: "Временно превышен лимит запросов Gemini. Попробуйте позже."
-          });
-        }
-
-        return res.status(502).json({
-          error: `Ошибка Gemini (${response.status}). Проверьте настройки API и журналы Vercel.`
-        });
-      }
-
-      // Паузы между попытками: 1 секунда, затем 2 секунды.
-      await new Promise(resolve =>
-        setTimeout(resolve, 1000 * (attempt + 1))
-      );
+      console.error("LISICHKA_DIAG: Gemini network error", geminiError);
     }
 
-    if (lastStatus && (lastStatus < 200 || lastStatus >= 300)) {
+    const status = geminiResponse?.status;
+
+    // Резерв включаем только при 503 или сетевом тайм-ауте/сбое.
+    const shouldFallback =
+      status === 503 ||
+      !geminiResponse ||
+      geminiError === "Gemini timeout" ||
+      geminiError === "Сетевая ошибка Gemini";
+
+    if (!shouldFallback) {
+      if (status === 429) {
+        return res.status(502).json({
+          error: "Превышен лимит запросов Gemini. Попробуйте позже."
+        });
+      }
+
+      if (status === 401 || status === 403) {
+        return res.status(502).json({
+          error: "Gemini отклонил запрос. Проверьте API-ключ и доступ."
+        });
+      }
+
       return res.status(502).json({
-        error: "Gemini пока не отвечает. Попробуйте ещё раз немного позже."
+        error: "Gemini не смог сформировать ответ. Попробуйте ещё раз."
       });
     }
 
-    const reply = (result?.candidates?.[0]?.content?.parts || [])
-      .map(p => p.text || "")
-      .join("\n")
-      .trim();
+    // 2. Резерв: Antigravity Agent через Interactions API.
+    console.log("LISICHKA_DIAG: switching to Antigravity");
+
+    const conversation = contents.map(message => {
+      const role = message.role === "model" ? "Лисичка" : "Пользователь";
+      const text = message.parts.map(part => part.text).join("\n");
+      return `${role}: ${text}`;
+    }).join("\n\n");
+
+    const agentResponse = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/interactions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": apiKey.trim()
+        },
+        body: JSON.stringify({
+          agent: "antigravity-preview-05-2026",
+          agent_config: {
+            type: "dynamic"
+          },
+          system_instruction: systemInstruction,
+          input: conversation,
+          store: false
+        }),
+        signal: AbortSignal.timeout(45000)
+      }
+    );
+
+    const agentData = await readJson(agentResponse);
+
+    if (!agentResponse.ok) {
+      console.error(
+        "LISICHKA_DIAG: Antigravity HTTP",
+        agentResponse.status,
+        agentData?.error?.message || "Описание ошибки отсутствует"
+      );
+
+      return res.status(502).json({
+        error: "Gemini временно недоступен, а резервный агент тоже не смог ответить. Попробуйте ещё раз через минуту."
+      });
+    }
+
+    const reply = extractAgentText(agentData);
 
     if (!reply) {
       console.error(
-        "LISICHKA_DIAG: Gemini returned no text",
-        JSON.stringify(result?.promptFeedback || {})
+        "LISICHKA_DIAG: Antigravity returned no text",
+        agentData?.status || "unknown status"
       );
 
       return res.status(502).json({
-        error: "Gemini не вернул текстовый ответ. Попробуйте задать вопрос ещё раз."
+        error: "Резервный агент не вернул готовый ответ. Попробуйте ещё раз."
       });
     }
 
-    console.log("LISICHKA_DIAG: response received successfully");
-
+    console.log("LISICHKA_DIAG: Antigravity success");
     return res.status(200).json({ reply });
 
   } catch (error) {
@@ -183,8 +227,8 @@ module.exports = async function handler(req, res) {
       error?.message || String(error)
     );
 
-    return res.status(500).json({
-      error: "Внутренняя ошибка сервера при обращении к Gemini."
+    return res.status(502).json({
+      error: "Лисичка временно недоступна. Попробуйте ещё раз немного позже."
     });
   }
 };
