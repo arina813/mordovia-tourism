@@ -180,10 +180,9 @@ module.exports = async function handler(req, res) {
           "x-goog-api-key": apiKey.trim()
         },
         body: JSON.stringify({
-          agent: "antigravity-preview-05-2026",
-          agent_config: {
-            type: "dynamic"
-          },
+  agent: "antigravity-preview-09-2026",
+  environment: "remote",
+  agent_config: { type: "antigravity" },
           system_instruction: systemInstruction,
           input: conversation,
           store: false
